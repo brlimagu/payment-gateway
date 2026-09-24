@@ -1,5 +1,8 @@
 package com.checkout.payment.gateway.infrastructure.bank;
 
+import java.net.ConnectException;
+import java.net.SocketTimeoutException;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -8,6 +11,9 @@ import static org.springframework.test.web.client.match.MockRestRequestMatchers.
 import static org.springframework.test.web.client.match.MockRestRequestMatchers.requestTo;
 import static org.springframework.test.web.client.response.MockRestResponseCreators.withStatus;
 import static org.springframework.test.web.client.response.MockRestResponseCreators.withSuccess;
+import static org.springframework.test.web.client.ExpectedCount.once;
+import static org.springframework.test.web.client.ExpectedCount.times;
+import static org.springframework.test.web.client.response.MockRestResponseCreators.withException;
 
 import com.checkout.payment.gateway.application.exception.BankContractException;
 import com.checkout.payment.gateway.application.exception.BankUnavailableException;
@@ -105,5 +111,43 @@ class RestAcquiringBankClientTest {
         .andRespond(withStatus(HttpStatus.BAD_REQUEST));
 
     assertThrows(BankContractException.class, () -> client.authorize(request()));
+  }
+
+  @Test
+  void retriesConnectionRefusedAndGivesUpAfterThreeAttempts() {
+    server.expect(times(3), requestTo("http://bank/payments"))
+        .andRespond(withException(new ConnectException("Connection refused")));
+
+    assertThrows(BankUnavailableException.class, () -> client.authorize(request()));
+    server.verify();
+  }
+
+  @Test
+  void succeedsWhenTheBankBecomesReachableOnRetry() {
+    server.expect(once(), requestTo("http://bank/payments"))
+        .andRespond(withException(new ConnectException("Connection refused")));
+    server.expect(once(), requestTo("http://bank/payments"))
+        .andRespond(withSuccess(
+            "{\"authorized\":true,\"authorization_code\":\"abc-123\"}",
+            MediaType.APPLICATION_JSON));
+
+    assertTrue(client.authorize(request()).authorized());
+    server.verify();
+  }
+
+  @Test
+  void neverRetriesATimeout() {
+    server.expect(once(), requestTo("http://bank/payments"))
+        .andRespond(withException(new SocketTimeoutException("Read timed out")));
+
+    assertThrows(BankUnavailableException.class, () -> client.authorize(request()));
+    server.verify();
+  }
+
+  @Test
+  void emptyBodyIsTreatedAsUnavailable() {
+    server.expect(requestTo("http://bank/payments")).andRespond(withSuccess());
+
+    assertThrows(BankUnavailableException.class, () -> client.authorize(request()));
   }
 }
