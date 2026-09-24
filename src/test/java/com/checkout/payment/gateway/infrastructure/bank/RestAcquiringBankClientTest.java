@@ -41,7 +41,7 @@ class RestAcquiringBankClientTest {
 
   @Autowired
   private AcquiringBankClient client;
-  
+
   @Autowired
   private MockRestServiceServer server;
 
