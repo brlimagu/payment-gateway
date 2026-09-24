@@ -67,6 +67,38 @@ The simulator decides by the card's last digit. Odd digits are authorized, even 
 
 The code is split into four layers, and every dependency points inwards.
 
+```mermaid
+flowchart TB
+  subgraph Web["Web: controller, model, exception"]
+    C[PaymentGatewayController]
+    H[CommonExceptionHandler]
+  end
+  subgraph App["Application"]
+    S[PaymentGatewayService]
+    BP[["AcquiringBankClient (interface)"]]
+  end
+  subgraph Dom["Domain"]
+    P[Payment]
+    VO["CardNumber, Cvv, ExpiryDate, Money"]
+    RP[["PaymentsRepository (interface)"]]
+  end
+  subgraph Infra["Infrastructure"]
+    RC[RestAcquiringBankClient]
+    IM[InMemoryPaymentsRepository]
+  end
+
+  C --> S
+  S --> VO
+  S --> P
+  S --> BP
+  S --> RP
+  RC -. implements .-> BP
+  IM -. implements .-> RP
+  RC --> Bank[("Bank simulator :8080")]
+```
+
+Solid arrows mean "uses" and dotted arrows mean "implements". Nothing points out of the domain, and the infrastructure classes point inwards, at interfaces the inner layers declare.
+
 | Layer | Package | What it holds |
 |---|---|---|
 | Domain | `domain` | The `Payment` entity, the value objects (`CardNumber`, `Cvv`, `ExpiryDate`, `Money`), the repository interface. It imports nothing else from the project. |
@@ -129,9 +161,18 @@ Error responses never include exception messages. The details go to the log.
 
 ## Retries
 
-The call to the bank is retried (3 attempts, waiting 300 ms and then 600 ms) only when it is guaranteed that the request never reached the bank: a refused connection, a DNS failure or a TLS failure.
+The call to the bank is tried at most 3 times in total (waiting 300 ms before the second attempt and 600 ms before the third), and a retry only happens when it's guaranteed that the request never reached the bank.
 
-A 503 isn't retried. The bank may have processed the payment before failing, and a second attempt could charge the card twice. Timeouts aren't retried either. With the JVM's default HTTP client, a connect timeout and a read timeout throw the same `SocketTimeoutException`, so there's no way to tell "never connected" from "sent it and got no answer back."
+| Failure | What the client sees | Retried? | Why |
+|---|---|---|---|
+| Connection refused | `ConnectException` | ✅ | The request never left the gateway |
+| DNS failure | `UnknownHostException` | ✅ | The bank's address was never resolved |
+| TLS handshake failure | `SSLException` | ✅ | No connection was ever established |
+| Bank returns 503 or 500 | An HTTP response | ❌ | The bank may have processed the payment, so a second attempt could charge the card twice |
+| Timeout | `SocketTimeoutException` | ❌ | With the JVM's default HTTP client, connect and read timeouts throw the same exception, so "never connected" can't be told apart from "sent it and got no answer" |
+| Bank returns 4xx | An HTTP response | ❌ | Our payload is wrong, and sending it again repeats the mistake |
+
+Being this strict means some transient failures are never retried. For payments that's the right side to err on: a failed payment can be sent again by the merchant, while a double charge turns into a refund and an incident.
 
 `@Retryable` filters by exception type, but this decision depends on the exception's cause. So the client wraps the safe cases in its own exception type and retries only on that one. When the attempts run out, a `@Recover` method turns the failure into `BankUnavailableException`, which becomes a 502 like any other outage. The two bank exceptions are marked `notRecoverable`, so they reach the error handler untouched instead of being routed to a recovery method that doesn't match them.
 
@@ -166,5 +207,5 @@ These are out of scope here, but a production version would need them:
 1. **Save the payment as `Pending` before calling the bank**, update it with the answer, and reconcile anything left pending. Today, if the bank authorizes and saving fails, the money moves and there's no record of it. It's the one place in this design where money can go missing. I didn't build it here: with in-memory storage, a `Pending` record would disappear with the process in the same crash it's meant to survive, and the simulator has no endpoint to ask for a payment's status, so there would be nothing to reconcile against. It becomes worth building together with durable storage.
 2. **Idempotency keys**, so retries are safe from the merchant's side too.
 3. **A circuit breaker**, so a long bank outage doesn't cost three attempts on every request.
-4. **Metrics**: authorization rate per currency, bank latency at p95 and p99, and outage counts.
+4. **Metrics and tracing**: `payments_processed_total` tagged by status and currency, bank latency at p95 and p99, a count of bank outages, and a trace id on every response so a merchant's support ticket can be matched to our logs. Card numbers and CVVs stay out of logs, as the log-capture test already checks.
 5. **An injected `Clock` in `ExpiryDate`**, so the expiry tests don't depend on today's date.
