@@ -161,9 +161,18 @@ Error responses never include exception messages. The details go to the log.
 
 ## Retries
 
-The call to the bank is tried at most 3 times in total, waiting 300 ms before the second attempt and 600 ms before the third. A retry only happens when it is guaranteed that the request never reached the bank: a refused connection, a DNS failure or a TLS failure.
+The call to the bank is tried at most 3 times in total (waiting 300 ms before the second attempt and 600 ms before the third), and a retry only happens when it's guaranteed that the request never reached the bank.
 
-Anything that got an HTTP response back is not retried. After a 503 the bank may already have processed the payment, and a second attempt could charge the card twice. After a 4xx the problem is our payload, so sending it again would just repeat the mistake. Timeouts aren't retried either. With the JVM's default HTTP client, a connect timeout and a read timeout throw the same `SocketTimeoutException`, so there's no way to tell "never connected" from "sent it and got no answer back."
+| Failure | What the client sees | Retried? | Why |
+|---|---|---|---|
+| Connection refused | `ConnectException` | ✅ | The request never left the gateway |
+| DNS failure | `UnknownHostException` | ✅ | The bank's address was never resolved |
+| TLS handshake failure | `SSLException` | ✅ | No connection was ever established |
+| Bank returns 503 or 500 | An HTTP response | ❌ | The bank may have processed the payment, so a second attempt could charge the card twice |
+| Timeout | `SocketTimeoutException` | ❌ | With the JVM's default HTTP client, connect and read timeouts throw the same exception, so "never connected" can't be told apart from "sent it and got no answer" |
+| Bank returns 4xx | An HTTP response | ❌ | Our payload is wrong, and sending it again repeats the mistake |
+
+Being this strict means some transient failures are never retried. For payments that's the right side to err on: a failed payment can be sent again by the merchant, while a double charge turns into a refund and an incident.
 
 `@Retryable` filters by exception type, but this decision depends on the exception's cause. So the client wraps the safe cases in its own exception type and retries only on that one. When the attempts run out, a `@Recover` method turns the failure into `BankUnavailableException`, which becomes a 502 like any other outage. The two bank exceptions are marked `notRecoverable`, so they reach the error handler untouched instead of being routed to a recovery method that doesn't match them.
 
