@@ -8,4 +8,10 @@ record BankPaymentRequest(
     @JsonProperty("currency") String currency,
     @JsonProperty("amount") Integer amount,
     @JsonProperty("cvv") String cvv) {
+
+  @Override
+  public String toString() {
+    return "BankPaymentRequest{card=****, expiryDate=" + expiryDate
+        + ", currency=" + currency + ", amount=" + amount + "}";
+  }
 }
