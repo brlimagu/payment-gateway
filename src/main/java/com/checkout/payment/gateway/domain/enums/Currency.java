@@ -9,8 +9,10 @@ public enum Currency {
   USD,
   BRL;
 
+  public static final String CODE_PATTERN = "[A-Za-z]{3}";
+
   public static Currency fromCode(String code) {
-    if (code == null || code.length() != 3) {
+    if (code == null || !code.matches(CODE_PATTERN)) {
       throw new DomainException("Currency must be a 3 letter ISO code");
     }
     try {
