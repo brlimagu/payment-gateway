@@ -7,6 +7,12 @@ import com.checkout.payment.gateway.application.port.AuthorizationRequest;
 import com.checkout.payment.gateway.application.port.BankAuthorization;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import java.net.ConnectException;
+import java.net.UnknownHostException;
+import javax.net.ssl.SSLException;
+import org.springframework.retry.annotation.Backoff;
+import org.springframework.retry.annotation.Recover;
+import org.springframework.retry.annotation.Retryable;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.HttpClientErrorException;
@@ -29,6 +35,11 @@ public class RestAcquiringBankClient implements AcquiringBankClient {
   }
 
   @Override
+  @Retryable(
+      retryFor = RetryableBankException.class,
+      notRecoverable = {BankUnavailableException.class, BankContractException.class},
+      maxAttempts = 3,
+      backoff = @Backoff(delay = 300, multiplier = 2))
   public BankAuthorization authorize(AuthorizationRequest request) {
     BankPaymentRequest body = toBankRequest(request);
 
@@ -51,7 +62,12 @@ public class RestAcquiringBankClient implements AcquiringBankClient {
       throw new BankContractException("Invalid request sent to acquiring bank", e);
 
     } catch (ResourceAccessException e) {
-      LOG.error("Could not reach acquiring bank", e);
+      if (isSafeToRetry(e)) {
+        LOG.warn("Could not reach acquiring bank ({}), will retry",
+            e.getCause().getClass().getSimpleName());
+        throw new RetryableBankException("Acquiring bank is unreachable", e);
+      }
+      LOG.error("Acquiring bank call failed with unknown outcome, not retrying", e);
       throw new BankUnavailableException("Acquiring bank is unreachable", e);
     }
   }
@@ -63,5 +79,19 @@ public class RestAcquiringBankClient implements AcquiringBankClient {
         request.money().currency().name(),
         request.money().amount(),
         request.cvv().value());
+  }
+
+  @Recover
+  BankAuthorization recoverFromUnreachableBank(RetryableBankException e,
+      AuthorizationRequest request) {
+    LOG.error("Acquiring bank unreachable after {} attempts", 3, e);
+    throw new BankUnavailableException("Acquiring bank is unreachable", e);
+  }
+
+  private static boolean isSafeToRetry(ResourceAccessException e) {
+    Throwable cause = e.getCause();
+    return cause instanceof ConnectException
+        || cause instanceof UnknownHostException
+        || cause instanceof SSLException;
   }
 }
