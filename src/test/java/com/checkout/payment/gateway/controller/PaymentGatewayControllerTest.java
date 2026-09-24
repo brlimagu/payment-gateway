@@ -148,23 +148,44 @@ class PaymentGatewayControllerTest {
   }
 
   @Test
-  void decimalAmountIsRejectedAsMalformedBody() throws Exception {
+  void decimalAmountIsRejectedWithoutReachingTheBank() throws Exception {
     String decimal = VALID_BODY.replace("\"amount\":100", "\"amount\":10.50");
 
     mvc.perform(post("/payment").contentType(APPLICATION_JSON).content(decimal))
-        .andExpect(status().isBadRequest());
+        .andExpect(status().isUnprocessableEntity())
+        .andExpect(jsonPath("$.status").value("Rejected"))
+        .andExpect(jsonPath("$.reasons[0]").value("amount has an invalid value"));
 
     verifyNoInteractions(bankClient);
   }
 
   @Test
-  void nonNumericAmountIsRejectedAsMalformedBody() throws Exception {
+  void nonNumericAmountIsRejected() throws Exception {
     String text = VALID_BODY.replace("\"amount\":100", "\"amount\":\"dez\"");
 
     mvc.perform(post("/payment").contentType(APPLICATION_JSON).content(text))
-        .andExpect(status().isBadRequest());
+        .andExpect(status().isUnprocessableEntity())
+        .andExpect(jsonPath("$.status").value("Rejected"))
+        .andExpect(jsonPath("$.reasons[0]").value("amount has an invalid value"));
   }
 
+  @Test
+  void monthWithLeadingZeroIsRejectedAsInvalidJson() throws Exception {
+    String leadingZero = VALID_BODY.replace("\"expiry_month\":4", "\"expiry_month\":04");
+
+    mvc.perform(post("/payment").contentType(APPLICATION_JSON).content(leadingZero))
+        .andExpect(status().isUnprocessableEntity())
+        .andExpect(jsonPath("$.status").value("Rejected"))
+        .andExpect(jsonPath("$.reasons[0]").value(containsString("not valid JSON")));
+  }
+
+  @Test
+  void rejectionReasonNeverEchoesTheValueSent() throws Exception {
+    String decimal = VALID_BODY.replace("\"amount\":100", "\"amount\":10.50");
+
+    mvc.perform(post("/payment").contentType(APPLICATION_JSON).content(decimal))
+        .andExpect(content().string(not(containsString("10.5"))));
+  }
   @Test
   void bankOutageReturnsBadGateway() throws Exception {
     when(bankClient.authorize(any()))

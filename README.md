@@ -128,8 +128,7 @@ Both layers share the same constants. The regexes and limits are `public static 
 |---|---|---|---|---|
 | Authorized | 200 | `status: Authorized` | Yes | Yes |
 | Declined | 200 | `status: Declined` | Yes | Yes |
-| Invalid payment | 422 | `status: Rejected` and a list of `reasons` | No | No |
-| Unreadable body (broken JSON, text or decimal amount) | 400 | `message` | No | No |
+| Invalid payment (a broken rule, a missing field, or a body that can't be read) | 422 | `status: Rejected` and a list of `reasons` | No | No |
 | Id is not a UUID | 400 | `message` | No | No |
 | Payment not found | 404 | `message` | No | No |
 | Bank returned 5xx or couldn't be reached | 502 | `message` | Yes | No |
@@ -139,7 +138,7 @@ Some of these are judgement calls, so here is the reasoning.
 
 A decline returns 200. The bank answered and the API did its job; the answer just happened to be no.
 
-An invalid payment returns 422 rather than 400. A 400 means the request couldn't be read at all. A 422 means it was read fine and breaks a rule, like an expired card. That split tells the merchant whether the bug is in their serializer or in their data.
+Every invalid payment request returns 422 with `status: Rejected`, whether it breaks a rule (an expired card) or can't be read at all (broken JSON, `10.50` as an amount, a month written as `04`). The challenge defines Rejected as "invalid information was supplied", and all of those are exactly that. The reasons still tell them apart: a broken rule says what was wrong, and an unreadable body names the field or says the JSON is invalid, without echoing what was sent. The only 400 left is a GET with an id that isn't a UUID, because that's a lookup, not a payment.
 
 A bank outage returns 502 rather than 500, because our side worked and the bank didn't, so trying again later is reasonable. A 4xx from the bank is different: it means we built a bad payload after the merchant's request passed all our checks. Retrying won't fix that, so it returns 500 and the log flags it as a gateway bug.
 
@@ -154,25 +153,17 @@ Error responses never include exception messages. The details go to the log.
 - Card numbers with spaces or dashes are rejected, not cleaned up.
 - Rejected payments aren't stored. No payment was created, so there's nothing to fetch.
 - Declined payments are stored and can be fetched, since merchants need them for reconciliation.
-- Amounts are integers in the currency's minor unit (`1050` is £10.50), up to the `Integer` limit of roughly £21 million per payment. Jackson accepts `10.50` in an integer field by default and silently truncates it to `10`, so `accept-float-as-int` is turned off and decimals get a 400.
+- Amounts are integers in the currency's minor unit (`1050` is £10.50), up to the `Integer` limit of roughly £21 million per payment. Jackson accepts `10.50` in an integer field by default and silently truncates it to `10`, so `accept-float-as-int` is turned off and a decimal amount is rejected.
 - Payment ids are random UUIDs.
 - Storage is in memory and is lost on restart, which the challenge allows.
 - There is no idempotency, so sending the same request twice creates two payments.
+- Request bodies must be valid JSON, so a number with a leading zero (`"expiry_month": 04`) is rejected. The month can be sent as `4` or as the string `"04"`.
 
 ## Retries
 
-The call to the bank is tried at most 3 times in total (waiting 300 ms before the second attempt and 600 ms before the third), and a retry only happens when it's guaranteed that the request never reached the bank.
+The call to the bank is tried at most 3 times in total, waiting 300 ms before the second attempt and 600 ms before the third. A retry only happens when it is guaranteed that the request never reached the bank: a refused connection, a DNS failure or a TLS failure.
 
-| Failure | What the client sees | Retried? | Why |
-|---|---|---|---|
-| Connection refused | `ConnectException` | ✅ | The request never left the gateway |
-| DNS failure | `UnknownHostException` | ✅ | The bank's address was never resolved |
-| TLS handshake failure | `SSLException` | ✅ | No connection was ever established |
-| Bank returns 503 or 500 | An HTTP response | ❌ | The bank may have processed the payment, so a second attempt could charge the card twice |
-| Timeout | `SocketTimeoutException` | ❌ | With the JVM's default HTTP client, connect and read timeouts throw the same exception, so "never connected" can't be told apart from "sent it and got no answer" |
-| Bank returns 4xx | An HTTP response | ❌ | Our payload is wrong, and sending it again repeats the mistake |
-
-Being this strict means some transient failures are never retried. For payments that's the right side to err on: a failed payment can be sent again by the merchant, while a double charge turns into a refund and an incident.
+Anything that got an HTTP response back is not retried. After a 503 the bank may already have processed the payment, and a second attempt could charge the card twice. After a 4xx the problem is our payload, so sending it again would just repeat the mistake. Timeouts aren't retried either. With the JVM's default HTTP client, a connect timeout and a read timeout throw the same `SocketTimeoutException`, so there's no way to tell "never connected" from "sent it and got no answer back."
 
 `@Retryable` filters by exception type, but this decision depends on the exception's cause. So the client wraps the safe cases in its own exception type and retries only on that one. When the attempts run out, a `@Recover` method turns the failure into `BankUnavailableException`, which becomes a 502 like any other outage. The two bank exceptions are marked `notRecoverable`, so they reach the error handler untouched instead of being routed to a recovery method that doesn't match them.
 

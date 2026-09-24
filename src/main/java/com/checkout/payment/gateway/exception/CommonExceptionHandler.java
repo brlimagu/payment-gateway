@@ -44,14 +44,19 @@ public class CommonExceptionHandler {
   }
 
   @ExceptionHandler(HttpMessageNotReadableException.class)
-  public ResponseEntity<ErrorResponse> handleUnreadableBody(HttpMessageNotReadableException ex) {
-    Throwable cause = ex.getMostSpecificCause();
-    String field = cause instanceof JsonMappingException mapping
-        ? mapping.getPathReference()
-        : cause.getClass().getSimpleName();
-    LOG.info("Malformed request body at {}", field);
-    return ResponseEntity.badRequest()
-        .body(new ErrorResponse("Malformed request body"));
+  public ResponseEntity<RejectedResponse> handleUnreadableBody(HttpMessageNotReadableException ex) {
+    String reason = unreadableBodyReason(ex.getCause());
+    LOG.info("Payment rejected, unreadable body: {}", reason);
+    return ResponseEntity.unprocessableEntity().body(RejectedResponse.of(reason));
+  }
+
+  private static String unreadableBodyReason(Throwable cause) {
+    if (cause instanceof JsonMappingException mapping && !mapping.getPath().isEmpty()) {
+      List<JsonMappingException.Reference> path = mapping.getPath();
+      String field = path.get(path.size() - 1).getFieldName();
+      return field + " has an invalid value";
+    }
+    return "request body is missing or is not valid JSON";
   }
   @ExceptionHandler(MethodArgumentTypeMismatchException.class)
   public ResponseEntity<ErrorResponse> handleTypeMismatch(MethodArgumentTypeMismatchException ex) {
