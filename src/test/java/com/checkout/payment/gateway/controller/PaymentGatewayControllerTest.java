@@ -2,6 +2,7 @@ package com.checkout.payment.gateway.controller;
 
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.hasSize;
+import static org.hamcrest.Matchers.not;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -10,7 +11,9 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
 
+import com.checkout.payment.gateway.application.exception.BankContractException;
 import com.checkout.payment.gateway.application.exception.BankUnavailableException;
 import com.checkout.payment.gateway.application.port.AcquiringBankClient;
 import com.checkout.payment.gateway.application.port.BankAuthorization;
@@ -177,5 +180,26 @@ class PaymentGatewayControllerTest {
   void malformedPaymentIdReturnsBadRequest() throws Exception {
     mvc.perform(get("/payment/not-a-uuid"))
         .andExpect(status().isBadRequest());
+  }
+
+  @Test
+  void bankContractErrorReturnsInternalServerError() throws Exception {
+    when(bankClient.authorize(any()))
+        .thenThrow(new BankContractException("bad payload", null));
+
+    mvc.perform(post("/payment").contentType(APPLICATION_JSON).content(VALID_BODY))
+        .andExpect(status().isInternalServerError())
+        .andExpect(jsonPath("$.message").value("Unexpected error"));
+  }
+
+  @Test
+  void unexpectedErrorNeverLeaksInternalDetails() throws Exception {
+    when(bankClient.authorize(any()))
+        .thenThrow(new IllegalStateException("secret internal detail"));
+
+    mvc.perform(post("/payment").contentType(APPLICATION_JSON).content(VALID_BODY))
+        .andExpect(status().isInternalServerError())
+        .andExpect(jsonPath("$.message").value("Unexpected error"))
+        .andExpect(content().string(not(containsString("secret"))));
   }
 }
