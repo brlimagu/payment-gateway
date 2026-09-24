@@ -6,6 +6,8 @@ import com.checkout.payment.gateway.application.exception.PaymentNotFoundExcepti
 import com.checkout.payment.gateway.domain.exception.DomainException;
 import com.checkout.payment.gateway.model.ErrorResponse;
 import com.checkout.payment.gateway.model.RejectedResponse;
+
+import com.fasterxml.jackson.databind.JsonMappingException;
 import java.util.List;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -43,11 +45,14 @@ public class CommonExceptionHandler {
 
   @ExceptionHandler(HttpMessageNotReadableException.class)
   public ResponseEntity<ErrorResponse> handleUnreadableBody(HttpMessageNotReadableException ex) {
-    LOG.info("Malformed request body: {}", ex.getMessage());
+    Throwable cause = ex.getMostSpecificCause();
+    String field = cause instanceof JsonMappingException mapping
+        ? mapping.getPathReference()
+        : cause.getClass().getSimpleName();
+    LOG.info("Malformed request body at {}", field);
     return ResponseEntity.badRequest()
         .body(new ErrorResponse("Malformed request body"));
   }
-
   @ExceptionHandler(MethodArgumentTypeMismatchException.class)
   public ResponseEntity<ErrorResponse> handleTypeMismatch(MethodArgumentTypeMismatchException ex) {
     LOG.info("Invalid path parameter: {}", ex.getName());

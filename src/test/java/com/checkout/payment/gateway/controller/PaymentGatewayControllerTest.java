@@ -12,6 +12,8 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
+import static org.assertj.core.api.Assertions.assertThat;
+
 
 import com.checkout.payment.gateway.application.exception.BankContractException;
 import com.checkout.payment.gateway.application.exception.BankUnavailableException;
@@ -21,6 +23,9 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.util.UUID;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.springframework.boot.test.system.CapturedOutput;
+import org.springframework.boot.test.system.OutputCaptureExtension;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -201,5 +206,29 @@ class PaymentGatewayControllerTest {
         .andExpect(status().isInternalServerError())
         .andExpect(jsonPath("$.message").value("Unexpected error"))
         .andExpect(content().string(not(containsString("secret"))));
+  }
+
+  @Test
+  @ExtendWith(OutputCaptureExtension.class)
+  void neverWritesCardDataToTheLogs(CapturedOutput output) throws Exception {
+    String body = VALID_BODY.replace("\"cvv\":\"123\"", "\"cvv\":\"7391\"");
+    String expired = body.replace("\"expiry_year\":2035", "\"expiry_year\":2020");
+    String malformed = body.replace("\"amount\":100", "\"amount\":10.50");
+
+    when(bankClient.authorize(any())).thenReturn(new BankAuthorization(true, "abc"));
+    mvc.perform(post("/payment").contentType(APPLICATION_JSON).content(body));       // autorizado
+    mvc.perform(post("/payment").contentType(APPLICATION_JSON).content(expired));    // rejeitado no domínio
+    mvc.perform(post("/payment").contentType(APPLICATION_JSON).content(malformed));  // corpo inválido
+
+    when(bankClient.authorize(any()))
+        .thenThrow(new BankUnavailableException("bank down", null));
+    mvc.perform(post("/payment").contentType(APPLICATION_JSON).content(body));       // banco fora
+
+    assertThat(output)
+        .doesNotContain("2222405343248877")
+        .doesNotContain("7391");
+    assertThat(output)
+        .contains("Payment rejected")
+        .contains("Acquiring bank unavailable");
   }
 }
